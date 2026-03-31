@@ -436,15 +436,13 @@ async def scan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     alerts, total = scan_all(config)
 
     if total == 0:
-        # API might be failing - show debug info
         await update.message.reply_text(
-            f"⚠️ *Scan trả về 0 coins*\n\n"
-            f"Có thể do:\n"
+            f"⚠️ Scan returned 0 coins\n\n"
+            f"Possible reasons:\n"
             f"1. CoinGecko API rate limit\n"
-            f"2. Network timeout trên Railway\n"
-            f"3. Chờ 1-2 phút rồi thử lại\n\n"
-            f"Thử: `/test_api`",
-            parse_mode='Markdown'
+            f"2. Network timeout on Railway\n"
+            f"3. Wait 1-2 minutes and try again\n\n"
+            f"Try: /test_api"
         )
         return
 
@@ -464,10 +462,9 @@ async def scan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     alerts.sort(key=lambda x: x['spike_pct'], reverse=True)
 
     await update.message.reply_text(
-        f"🚨 *VOLUME SPIKES — {len(alerts)} found*\n"
-        f"📊 Scanned: {total} coins\n"
-        f"⏰ {datetime.utcnow().strftime('%H:%M UTC')}",
-        parse_mode='Markdown'
+        f"🚨 VOLUME SPIKES - {len(alerts)} found\n"
+        f"Scanned: {total} coins\n"
+        f"Time: {datetime.utcnow().strftime('%H:%M UTC')}"
     )
 
     for i, alert in enumerate(alerts[:10], 1):
@@ -737,8 +734,8 @@ async def auto_scan_job(context: ContextTypes.DEFAULT_TYPE):
 
     for chat_id in autoscan["chat_ids"]:
         try:
-            msg = f"🚨 *AUTO-SCAN ALERT — {len(alerts)} spikes*\n📊 Scanned: {total} coins\n⏰ {datetime.utcnow().strftime('%H:%M UTC')}\n"
-            await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode='Markdown')
+            msg = f"🚨 AUTO-SCAN ALERT - {len(alerts)} spikes\nScanned: {total} coins\nTime: {datetime.utcnow().strftime('%H:%M UTC')}"
+            await context.bot.send_message(chat_id=chat_id, text=msg)
 
             for i, alert in enumerate(alerts[:5], 1):
                 await context.bot.send_message(
@@ -760,12 +757,11 @@ async def autoscan_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     interval = autoscan.get("interval_minutes", 15)
     await update.message.reply_text(
-        f"✅ *AUTO-SCAN BẬT*\n"
-        f"⏰ Quét tự động mỗi *{interval} phút*\n"
-        f"📊 Chỉ gửi khi có volume spike\n\n"
-        f"Đổi interval: `/autoscan_interval <phút>`\n"
-        f"Tắt: `/autoscan_off`",
-        parse_mode='Markdown'
+        f"✅ AUTO-SCAN ON\n"
+        f"Scanning every {interval} minutes\n"
+        f"Only alerts when volume spike detected\n\n"
+        f"/autoscan_interval <minutes> - Change interval\n"
+        f"/autoscan_off - Turn off"
     )
 
 async def autoscan_off(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -792,25 +788,39 @@ async def autoscan_interval(update: Update, context: ContextTypes.DEFAULT_TYPE):
     autoscan = load_autoscan()
     autoscan["interval_minutes"] = val
     save_autoscan(autoscan)
+    
+    # Restart job queue with new interval
+    try:
+        job_queue = context.application.job_queue
+        if job_queue:
+            # Remove old jobs
+            for job in job_queue.jobs():
+                job.schedule_removal()
+            # Add new job with updated interval
+            job_queue.run_repeating(auto_scan_job, interval=val * 60, first=60)
+    except Exception as e:
+        print(f"Error restarting job queue: {e}")
+    
     await update.message.reply_text(f"✅ Auto-scan: mỗi *{val} phút*", parse_mode='Markdown')
 
 async def autoscan_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     autoscan = load_autoscan()
     chat_id = update.effective_chat.id
     is_subscribed = chat_id in autoscan.get("chat_ids", [])
-    status = "🟢 BẬT" if autoscan.get("enabled") and is_subscribed else "🔴 TẮT"
+    status = "ON" if autoscan.get("enabled") and is_subscribed else "OFF"
     interval = autoscan.get("interval_minutes", 15)
+    subs = len(autoscan.get("chat_ids", []))
 
     msg = (
-        f"⏰ *AUTO-SCAN*\n\n"
-        f"Trạng thái: {status}\n"
-        f"Interval: mỗi {interval} phút\n"
-        f"Subscribers: {len(autoscan.get('chat_ids', []))}\n\n"
-        f"/autoscan_on — Bật\n"
-        f"/autoscan_off — Tắt\n"
-        f"/autoscan_interval <phút> — Đổi interval\n"
+        f"AUTO-SCAN STATUS\n\n"
+        f"Status: {status}\n"
+        f"Interval: every {interval} minutes\n"
+        f"Subscribers: {subs}\n\n"
+        f"/autoscan_on - Enable\n"
+        f"/autoscan_off - Disable\n"
+        f"/autoscan_interval <minutes> - Change interval\n"
     )
-    await update.message.reply_text(msg, parse_mode='Markdown')
+    await update.message.reply_text(msg)
 
 # ============================================
 # MAIN
