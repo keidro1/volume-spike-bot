@@ -14,7 +14,7 @@ from datetime import datetime
 # CONFIG
 # ============================================
 
-BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
 
 # Supported exchanges (CoinGecko exchange IDs)
 EXCHANGES = {
@@ -55,6 +55,9 @@ CONFIG_FILE = os.path.expanduser("~/.openclaw/workspace/volume-monitor/bot-confi
 WATCHLIST_FILE = os.path.expanduser("~/.openclaw/workspace/volume-monitor/watchlist.json")
 HISTORY_FILE = os.path.expanduser("~/.openclaw/workspace/volume-monitor/history.json")
 
+# Auto-scan config
+AUTOSCAN_FILE = os.path.expanduser("~/.openclaw/workspace/volume-monitor/autoscan.json")
+
 # ============================================
 # CONFIG MANAGEMENT
 # ============================================
@@ -80,6 +83,20 @@ def save_config(config):
     os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
     with open(CONFIG_FILE, 'w') as f:
         json.dump(config, f, indent=2)
+
+def load_autoscan():
+    """Load auto-scan settings"""
+    os.makedirs(os.path.dirname(AUTOSCAN_FILE), exist_ok=True)
+    try:
+        with open(AUTOSCAN_FILE, 'r') as f:
+            return json.load(f)
+    except:
+        return {"enabled": False, "interval_minutes": 15, "chat_ids": []}
+
+def save_autoscan(data):
+    os.makedirs(os.path.dirname(AUTOSCAN_FILE), exist_ok=True)
+    with open(AUTOSCAN_FILE, 'w') as f:
+        json.dump(data, f, indent=2)
 
 def load_watchlist():
     os.makedirs(os.path.dirname(WATCHLIST_FILE), exist_ok=True)
@@ -308,6 +325,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/watchlist — Xem watchlist\n"
         "/config — Cấu hình bot\n"
         "/exchanges — Quản lý sàn\n"
+        "/autoscan — Bật/tắt auto-scan\n"
         "/timeframe <1h/4h/12h/24h/7d> — Đổi timeframe\n"
         "/threshold <phần_trăm> — Đổi ngưỡng spike\n"
         "/help — Hướng dẫn\n"
@@ -603,15 +621,131 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(f"❌ Không tìm thấy `{escape_md(text)}`\nThử: /add {text}", parse_mode='Markdown')
 
+# ============================================
+# AUTO-SCAN
+# ============================================
+
+async def auto_scan_job(context: ContextTypes.DEFAULT_TYPE):
+    """Scheduled job: auto-scan and send alerts"""
+    autoscan = load_autoscan()
+    if not autoscan.get("enabled"):
+        return
+    if not autoscan.get("chat_ids"):
+        return
+    
+    config = load_config()
+    alerts, total = scan_all(config)
+    
+    if not alerts:
+        return  # No alerts, don't spam
+    
+    alerts.sort(key=lambda x: x['spike_pct'], reverse=True)
+    
+    for chat_id in autoscan["chat_ids"]:
+        try:
+            msg = f"🚨 *AUTO-SCAN ALERT — {len(alerts)} spikes*\n📊 Scanned: {total} coins\n⏰ {datetime.utcnow().strftime('%H:%M UTC')}\n\n"
+            await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode='Markdown')
+            
+            for i, alert in enumerate(alerts[:5], 1):
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"*#{i}*\n{format_alert(alert)}",
+                    parse_mode='Markdown'
+                )
+                await asyncio.sleep(0.5)
+        except Exception as e:
+            print(f"Error sending to {chat_id}: {e}")
+
+async def autoscan_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /autoscan_on"""
+    chat_id = update.effective_chat.id
+    autoscan = load_autoscan()
+    
+    if chat_id not in autoscan["chat_ids"]:
+        autoscan["chat_ids"].append(chat_id)
+    
+    autoscan["enabled"] = True
+    save_autoscan(autoscan)
+    
+    interval = autoscan.get("interval_minutes", 15)
+    await update.message.reply_text(
+        f"✅ *Auto-Scan BẬT*\n"
+        f"⏰ Quét tự động mỗi *{interval} phút*\n"
+        f"📊 Chỉ gửi khi có volume spike\n\n"
+        f"Đổi interval: `/autoscan_interval <phút>`\n"
+        f"Tắt: `/autoscan_off`",
+        parse_mode='Markdown'
+    )
+
+async def autoscan_off(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /autoscan_off"""
+    chat_id = update.effective_chat.id
+    autoscan = load_autoscan()
+    
+    autoscan["chat_ids"] = [cid for cid in autoscan["chat_ids"] if cid != chat_id]
+    if not autoscan["chat_ids"]:
+        autoscan["enabled"] = False
+    save_autoscan(autoscan)
+    
+    await update.message.reply_text("✅ Auto-Scan *TẮT*", parse_mode='Markdown')
+
+async def autoscan_interval(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /autoscan_interval"""
+    if not context.args:
+        await update.message.reply_text(
+            "❌ Cú pháp: `/autoscan_interval <phút>`\n"
+            "Ví dụ: `/autoscan_interval 10`\n"
+            "Tối thiểu: 5 phút",
+            parse_mode='Markdown'
+        )
+        return
+    
+    try:
+        val = int(context.args[0])
+        if val < 5 or val > 120:
+            raise ValueError()
+    except:
+        await update.message.reply_text("❌ Giá trị phải từ 5-120 phút")
+        return
+    
+    autoscan = load_autoscan()
+    autoscan["interval_minutes"] = val
+    save_autoscan(autoscan)
+    
+    await update.message.reply_text(f"✅ Auto-Scan interval: *mỗi {val} phút*", parse_mode='Markdown')
+
+async def autoscan_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /autoscan"""
+    autoscan = load_autoscan()
+    chat_id = update.effective_chat.id
+    is_subscribed = chat_id in autoscan.get("chat_ids", [])
+    
+    status = "🟢 ĐANG BẬT" if autoscan.get("enabled") and is_subscribed else "🔴 ĐANG TẮT"
+    interval = autoscan.get("interval_minutes", 15)
+    
+    msg = (
+        f"⏰ *AUTO-SCAN STATUS*\n\n"
+        f"Trạng thái: {status}\n"
+        f"Interval: mỗi {interval} phút\n"
+        f"Subscribers: {len(autoscan.get('chat_ids', []))}\n\n"
+        f"*Commands:*\n"
+        f"/autoscan_on — Bật auto-scan\n"
+        f"/autoscan_off — Tắt auto-scan\n"
+        f"/autoscan_interval <phút> — Đổi interval\n"
+    )
+    await update.message.reply_text(msg, parse_mode='Markdown')
+
 def main():
-    if BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
-        print("❌ Vui lòng thay BOT_TOKEN bằng token từ @BotFather")
+    if BOT_TOKEN == "YOUR_BOT_TOKEN_HERE" or not BOT_TOKEN:
+        print("❌ Vui lòng set BOT_TOKEN environment variable")
+        print("   Railway: Settings → Variables → Add BOT_TOKEN")
         return
     
     print("🚀 Starting Volume Spike Alert Bot v2...")
     
     app = Application.builder().token(BOT_TOKEN).build()
     
+    # Command handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("scan", scan_cmd))
@@ -623,10 +757,23 @@ def main():
     app.add_handler(CommandHandler("threshold", set_threshold))
     app.add_handler(CommandHandler("pricefilter", set_pricefilter))
     app.add_handler(CommandHandler("exchanges", exchanges_cmd))
+    
+    # Auto-scan commands
+    app.add_handler(CommandHandler("autoscan", autoscan_status))
+    app.add_handler(CommandHandler("autoscan_on", autoscan_on))
+    app.add_handler(CommandHandler("autoscan_off", autoscan_off))
+    app.add_handler(CommandHandler("autoscan_interval", autoscan_interval))
+    
     app.add_handler(CallbackQueryHandler(button_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    print("✅ Bot is running!")
+    # Schedule auto-scan job
+    autoscan = load_autoscan()
+    interval = autoscan.get("interval_minutes", 15)
+    job_queue = app.job_queue
+    job_queue.run_repeating(auto_scan_job, interval=interval * 60, first=60)  # First run after 1 min
+    
+    print(f"✅ Bot is running! (Auto-scan every {interval} min)")
     app.run_polling()
 
 if __name__ == "__main__":
