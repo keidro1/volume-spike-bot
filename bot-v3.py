@@ -435,6 +435,19 @@ async def scan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     alerts, total = scan_all(config)
 
+    if total == 0:
+        # API might be failing - show debug info
+        await update.message.reply_text(
+            f"⚠️ *Scan trả về 0 coins*\n\n"
+            f"Có thể do:\n"
+            f"1. CoinGecko API rate limit\n"
+            f"2. Network timeout trên Railway\n"
+            f"3. Chờ 1-2 phút rồi thử lại\n\n"
+            f"Thử: `/test_api`",
+            parse_mode='Markdown'
+        )
+        return
+
     if not alerts:
         await update.message.reply_text(
             f"✅ Không phát hiện volume spike\n"
@@ -665,6 +678,46 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text(f"❌ Không tìm thấy `{escape_md(text)}`", parse_mode='Markdown')
 
+async def test_api(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /test_api - debug API connection"""
+    await update.message.reply_text("🔍 Testing CoinGecko API...")
+
+    url = "https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=volume_desc&per_page=5&page=1&sparkline=false"
+    req = urllib.request.Request(url, headers={
+        'User-Agent': 'Mozilla/5.0',
+        'Accept': 'application/json'
+    })
+
+    try:
+        import time
+        start = time.time()
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode())
+        elapsed = time.time() - start
+
+        if data and len(data) > 0:
+            coins_info = []
+            for c in data[:5]:
+                coins_info.append(f"• {c.get('symbol','').upper()}: ${c.get('total_volume',0):,.0f}")
+
+            await update.message.reply_text(
+                f"✅ *API OK*\n"
+                f"⏱ Response: {elapsed:.1f}s\n"
+                f"📊 Got {len(data)} coins\n\n"
+                f"*Top 5:*\n" + "\n".join(coins_info),
+                parse_mode='Markdown'
+            )
+        else:
+            await update.message.reply_text("⚠️ API returned empty data")
+
+    except Exception as e:
+        await update.message.reply_text(
+            f"❌ *API Error*\n"
+            f"`{str(e)}`\n\n"
+            f"Có thể do rate limit. Chờ 1-2 phút.",
+            parse_mode='Markdown'
+        )
+
 # ============================================
 # AUTO-SCAN
 # ============================================
@@ -775,6 +828,7 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("scan", scan_cmd))
+    app.add_handler(CommandHandler("test_api", test_api))
     app.add_handler(CommandHandler("add", add_coin))
     app.add_handler(CommandHandler("remove", remove_coin))
     app.add_handler(CommandHandler("watchlist", show_watchlist))
